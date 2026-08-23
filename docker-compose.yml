@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: bancoxyz-postgres
+    environment:
+      POSTGRES_DB: bancoxyz_batch
+      POSTGRES_USER: bancoxyz
+      POSTGRES_PASSWORD: bancoxyz123
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bancoxyz -d bancoxyz_batch"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: batch-legacy-migration
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/bancoxyz_batch
+    username: bancoxyz
+    password: bancoxyz123
+    driver-class-name: org.postgresql.Driver
+    hikari:
+
+      maximum-pool-size: 10
+
+  batch:
+    jdbc:
+      initialize-schema: always
+    job:
+   
+      enabled: true
+
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema-postgres.sql
+
+batch:
+
+  input:
+    dir: data/semana_3
+
+  chunk-size: 5      # filas por chunk (commit cada 5 items)
+  thread-count: 3    # hilos de ejecucion paralela por chunk step
+
+
+  skip-limit: 300
+  retry-limit: 3     # reintentos ante un fallo transitorio de la base
+
+# tasas de interes mensual de ejemplo aplicadas por tipo de cuenta
+intereses:
+  tasa-ahorro: 0.005
+  tasa-prestamo: 0.012
+  tasa-hipoteca: 0.008
