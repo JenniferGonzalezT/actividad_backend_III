@@ -28,8 +28,9 @@ batch:
   input:
     dir: data/semana_3
 
-  chunk-size: 5      # filas por chunk (commit cada 5 items)
-  thread-count: 3    # hilos de ejecucion paralela por chunk step
+  chunk-size: 50     # filas por chunk
+  grid-size: 6       # particiones
+  thread-count: 6    # hilos de ejecucion paralela
 
 
   skip-limit: 300

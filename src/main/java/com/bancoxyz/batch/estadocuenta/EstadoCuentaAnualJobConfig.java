@@ -1,11 +1,16 @@
 package com.bancoxyz.batch.estadocuenta;
 
+import com.bancoxyz.batch.common.ArchivoPartitioner;
 import com.bancoxyz.batch.common.JobMetricasListener;
 import com.bancoxyz.batch.common.RegistroErrorListener;
+
 import org.springframework.batch.core.Job;
 import org.springframework.batch.core.Step;
+import org.springframework.batch.core.configuration.annotation.StepScope;
 import org.springframework.batch.core.job.builder.JobBuilder;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
+import org.springframework.batch.core.partition.support.Partitioner;
+import org.springframework.batch.core.partition.support.TaskExecutorPartitionHandler;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.builder.StepBuilder;
 import org.springframework.batch.core.step.skip.SkipPolicy;
@@ -14,7 +19,6 @@ import org.springframework.batch.item.database.JdbcBatchItemWriter;
 import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder;
 import org.springframework.batch.item.file.FlatFileItemReader;
 import org.springframework.batch.item.file.builder.FlatFileItemReaderBuilder;
-import org.springframework.batch.item.support.SynchronizedItemStreamReader;
 import org.springframework.batch.repeat.RepeatStatus;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -41,6 +45,9 @@ public class EstadoCuentaAnualJobConfig {
     @Value("${batch.chunk-size}")
     private int chunkSize;
 
+    @Value("${batch.grid-size}")
+    private int gridSize;
+
     @Value("${batch.retry-limit}")
     private int limiteReintentos;
 
@@ -61,8 +68,8 @@ public class EstadoCuentaAnualJobConfig {
 
     @Bean
     public Step truncarMovimientosStep(JobRepository jobRepository,
-                                        PlatformTransactionManager transactionManager,
-                                        JdbcTemplate jdbcTemplate) {
+                                       PlatformTransactionManager transactionManager,
+                                       JdbcTemplate jdbcTemplate) {
         Tasklet tasklet = (contribution, chunkContext) -> {
             jdbcTemplate.update("DELETE FROM movimiento_anual");
             jdbcTemplate.update("DELETE FROM estado_cuenta_anual");
@@ -74,19 +81,18 @@ public class EstadoCuentaAnualJobConfig {
     }
 
     @Bean
-    public Step cargarMovimientosStep(JobRepository jobRepository,
+    public Step cargarMovimientosWorkerStep(JobRepository jobRepository,
                                        PlatformTransactionManager transactionManager,
                                        JdbcTemplate jdbcTemplate,
                                        SkipPolicy politicaSkipPersonalizada,
                                        BackOffPolicy backOffBatch,
-                                       JobMetricasListener jobMetricasListener,
-                                       @Qualifier("batchTaskExecutor") TaskExecutor batchTaskExecutor) {
-        return new StepBuilder("cargarMovimientosStep", jobRepository)
+                                       JobMetricasListener jobMetricasListener) {
+        return new StepBuilder("cargarMovimientosWorkerStep", jobRepository)
                 .<MovimientoAnual, MovimientoAnual>chunk(chunkSize, transactionManager)
-                .reader(movimientoAnualItemReader())
+                .reader(movimientoAnualItemReader(null, null))
                 .processor(new MovimientoAnualProcessor())
                 .writer(movimientoAnualItemWriter(jdbcTemplate.getDataSource()))
-                // punto 4: politicas personalizadas de tolerancia a fallos
+                // politicas personalizadas de tolerancia a fallos
                 .faultTolerant()
                 .skipPolicy(politicaSkipPersonalizada)
                 .retry(TransientDataAccessException.class)
@@ -95,8 +101,6 @@ public class EstadoCuentaAnualJobConfig {
                 .backOffPolicy(backOffBatch)
                 .listener(new RegistroErrorListener<MovimientoAnual>(jdbcTemplate, JOB_NAME))
                 .listener(jobMetricasListener)
-                // punto 5: procesamiento en paralelo con el pool de hilos configurado
-                .taskExecutor(batchTaskExecutor)
                 .build();
     }
 
@@ -130,21 +134,21 @@ public class EstadoCuentaAnualJobConfig {
                 .build();
     }
 
-    /** Ver la nota de thread-safety en TransaccionDiariaJobConfig.transaccionItemReader(). */
-    private SynchronizedItemStreamReader<MovimientoAnual> movimientoAnualItemReader() {
-        FlatFileItemReader<MovimientoAnual> delegate = new FlatFileItemReaderBuilder<MovimientoAnual>()
+    @Bean
+    @StepScope
+    public FlatFileItemReader<MovimientoAnual> movimientoAnualItemReader(
+            @Value("#{stepExecutionContext['linesToSkip']}") Integer linesToSkip,
+            @Value("#{stepExecutionContext['itemCount']}") Integer itemCount) {
+
+        return new FlatFileItemReaderBuilder<MovimientoAnual>()
                 .name("movimientoAnualItemReader")
                 .resource(new FileSystemResource(archivoCuentasAnuales))
-                .linesToSkip(1)
-                .saveState(false)
+                .linesToSkip(linesToSkip != null ? linesToSkip : 1)
+                .maxItemCount(itemCount != null ? itemCount : 1000)
                 .delimited()
                 .names("cuentaIdTexto", "fechaTexto", "transaccionTexto", "montoTexto", "descripcion")
                 .targetType(MovimientoAnual.class)
                 .build();
-
-        SynchronizedItemStreamReader<MovimientoAnual> reader = new SynchronizedItemStreamReader<>();
-        reader.setDelegate(delegate);
-        return reader;
     }
 
     private JdbcBatchItemWriter<MovimientoAnual> movimientoAnualItemWriter(DataSource dataSource) {
@@ -163,5 +167,32 @@ public class EstadoCuentaAnualJobConfig {
             throw new IllegalStateException("No se pudo inicializar el writer de movimiento_anual", e);
         }
         return writer;
+    }
+
+    @Bean
+    public Partitioner estadosCuentaPartitioner() {
+        return new ArchivoPartitioner(1000); 
+    }
+
+    @Bean
+    public TaskExecutorPartitionHandler estadosCuentaPartitionHandler(
+            @Qualifier("cargarMovimientosWorkerStep") Step workerStep,
+            @Qualifier("batchTaskExecutor") TaskExecutor taskExecutor) {
+        
+        TaskExecutorPartitionHandler handler = new TaskExecutorPartitionHandler();
+        handler.setGridSize(gridSize); // Número de particiones
+        handler.setTaskExecutor(taskExecutor);
+        handler.setStep(workerStep);
+        return handler;
+    }
+
+    @Bean
+    public Step cargarMovimientosStep(JobRepository jobRepository,
+                                      Partitioner estadosCuentaPartitioner,
+                                      TaskExecutorPartitionHandler estadosCuentaPartitionHandler) {
+        return new StepBuilder("cargarMovimientosStep", jobRepository)
+                .partitioner("cargarMovimientosWorkerStep", estadosCuentaPartitioner)
+                .partitionHandler(estadosCuentaPartitionHandler)
+                .build();
     }
 }
